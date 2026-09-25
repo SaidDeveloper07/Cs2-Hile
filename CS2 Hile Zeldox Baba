@@ -1,0 +1,439 @@
+// ============================================================
+// ZELDOX — CS2 External Cheat Framework
+// Offsets: a2x/cs2-dumper 2026-09-25
+// ============================================================
+
+#pragma once
+#include <Windows.h>
+#include <TlHelp32.h>
+#include <cstdint>
+#include <string>
+#include <vector>
+#include <cmath>
+#include <thread>
+#include <chrono>
+
+// ======================== OFFSETS ========================
+namespace offsets {
+    // client.dll
+    constexpr uintptr_t dwEntityList              = 0x27130E8;
+    constexpr uintptr_t dwLocalPlayerController   = 0x2535598;
+    constexpr uintptr_t dwLocalPlayerPawn         = 0x255E658;
+    constexpr uintptr_t dwViewMatrix              = 0x25639A0;
+    constexpr uintptr_t dwViewAngles              = 0x25741C8;
+    constexpr uintptr_t dwGlobalVars              = 0x2229F88;
+    constexpr uintptr_t dwGameRules               = 0x255A858;
+    constexpr uintptr_t dwPlantedC4               = 0x24C7380;
+    constexpr uintptr_t dwGlowManager             = 0x255A870;
+    constexpr uintptr_t dwCSGOInput               = 0x2573B40;
+    constexpr uintptr_t dwSensitivity             = 0x255B3A8;
+    constexpr uintptr_t dwSensitivity_sensitivity = 0x58;
+    constexpr uintptr_t dwGameEntitySystem_highestEntityIndex = 0x2120;
+
+    // C_BaseEntity
+    constexpr uintptr_t m_pGameSceneNode = 0x330;
+    constexpr uintptr_t m_iHealth        = 0x34C;
+    constexpr uintptr_t m_lifeState      = 0x354;
+    constexpr uintptr_t m_iTeamNum       = 0x3E7;
+    constexpr uintptr_t m_fFlags         = 0x3F4;
+    constexpr uintptr_t m_vecAbsVelocity = 0x3F8;
+
+    // C_BasePlayerPawn / C_CSPlayerPawn
+    constexpr uintptr_t m_vOldOrigin     = 0x14A4;
+    constexpr uintptr_t m_angEyeAngles   = 0x35F0;
+    constexpr uintptr_t m_iIDEntIndex    = 0x36CC;
+    constexpr uintptr_t m_ArmorValue     = 0x1ECC;
+    constexpr uintptr_t m_bIsScoped      = 0x1EA0;
+    constexpr uintptr_t m_flFlashDuration= 0x1510;
+    constexpr uintptr_t m_entitySpottedState = 0x1E88;
+
+    // CCSPlayerController
+    constexpr uintptr_t m_hPlayerPawn    = 0x92C;
+    constexpr uintptr_t m_bPawnIsAlive   = 0x934;
+    constexpr uintptr_t m_iPawnHealth    = 0x938;
+    constexpr uintptr_t m_sSanitizedPlayerName = 0x850; // approx, verify if needed
+
+    // CGameSceneNode
+    constexpr uintptr_t m_vecAbsOrigin   = 0xC8;
+    constexpr uintptr_t m_bDormant       = 0x103;
+
+    // CSkeletonInstance
+    constexpr uintptr_t m_modelState     = 0x140;
+    constexpr uintptr_t m_boneArray      = 0x80; // inside modelState
+}
+
+// ======================== MATH ========================
+struct Vector3 {
+    float x, y, z;
+    Vector3() : x(0), y(0), z(0) {}
+    Vector3(float x, float y, float z) : x(x), y(y), z(z) {}
+    Vector3 operator-(const Vector3& o) const { return { x - o.x, y - o.y, z - o.z }; }
+    float Length() const { return sqrtf(x * x + y * y + z * z); }
+    float Length2D() const { return sqrtf(x * x + y * y); }
+};
+
+struct Vector2 {
+    float x, y;
+};
+
+struct Matrix4x4 {
+    float m[16];
+};
+
+struct ViewMatrix {
+    float matrix[4][4];
+};
+
+// ======================== MEMORY ========================
+class Memory {
+public:
+    HANDLE hProcess = nullptr;
+    uintptr_t clientBase = 0;
+    DWORD pid = 0;
+
+    bool Attach(const wchar_t* processName) {
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        PROCESSENTRY32W pe{ sizeof(pe) };
+        if (Process32FirstW(snap, &pe)) {
+            do {
+                if (!_wcsicmp(pe.szExeFile, processName)) {
+                    pid = pe.th32ProcessID;
+                    hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+                    break;
+                }
+            } while (Process32NextW(snap, &pe));
+        }
+        CloseHandle(snap);
+        return hProcess != nullptr;
+    }
+
+    uintptr_t GetModuleBase(const wchar_t* moduleName) {
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+        MODULEENTRY32W me{ sizeof(me) };
+        uintptr_t base = 0;
+        if (Module32FirstW(snap, &me)) {
+            do {
+                if (!_wcsicmp(me.szModule, moduleName)) {
+                    base = (uintptr_t)me.modBaseAddr;
+                    break;
+                }
+            } while (Module32NextW(snap, &me));
+        }
+        CloseHandle(snap);
+        return base;
+    }
+
+    template<typename T>
+    T Read(uintptr_t address) {
+        T value{};
+        ReadProcessMemory(hProcess, (LPCVOID)address, &value, sizeof(T), nullptr);
+        return value;
+    }
+
+    template<typename T>
+    void Write(uintptr_t address, T value) {
+        WriteProcessMemory(hProcess, (LPVOID)address, &value, sizeof(T), nullptr);
+    }
+};
+
+// ======================== ENTITY ========================
+struct Entity {
+    uintptr_t controller = 0;
+    uintptr_t pawn = 0;
+    int health = 0;
+    int team = 0;
+    int armor = 0;
+    bool alive = false;
+    bool scoped = false;
+    Vector3 origin;
+    Vector3 head;
+    std::string name;
+};
+
+// ======================== ZELDOX MENU STATE ========================
+namespace Zeldox {
+    // Aimbot
+    bool aimbot_enabled = false;
+    bool aimbot_visible_check = true;
+    float aimbot_fov = 5.0f;
+    float aimbot_smooth = 3.0f;
+    int aimbot_bone = 6; // head
+    int aimbot_key = VK_RBUTTON;
+    bool aimbot_team_check = true;
+
+    // Triggerbot
+    bool triggerbot_enabled = false;
+    int triggerbot_key = VK_XBUTTON1;
+    int triggerbot_delay = 30;
+
+    // ESP
+    bool esp_enabled = true;
+    bool esp_box = true;
+    bool esp_skeleton = true;
+    bool esp_health = true;
+    bool esp_armor = true;
+    bool esp_name = true;
+    bool esp_distance = true;
+    bool esp_snapline = false;
+    bool esp_team = false;
+    bool esp_glow = false;
+
+    // Misc
+    bool bhop = false;
+    bool radar_hack = false;
+    bool no_flash = false;
+    bool fov_changer = false;
+    float custom_fov = 90.0f;
+
+    // Menu
+    bool menu_open = true;
+    int menu_key = VK_INSERT;
+}
+
+// ======================== WORLD TO SCREEN ========================
+bool WorldToScreen(const Vector3& pos, Vector2& screen, const ViewMatrix& vm, int width, int height) {
+    float w = vm.matrix[3][0] * pos.x + vm.matrix[3][1] * pos.y + vm.matrix[3][2] * pos.z + vm.matrix[3][3];
+    if (w < 0.01f) return false;
+
+    float x = vm.matrix[0][0] * pos.x + vm.matrix[0][1] * pos.y + vm.matrix[0][2] * pos.z + vm.matrix[0][3];
+    float y = vm.matrix[1][0] * pos.x + vm.matrix[1][1] * pos.y + vm.matrix[1][2] * pos.z + vm.matrix[1][3];
+
+    screen.x = (width / 2.0f) + (width / 2.0f) * (x / w);
+    screen.y = (height / 2.0f) - (height / 2.0f) * (y / w);
+    return true;
+}
+
+// ======================== ENTITY LIST ========================
+std::vector<Entity> GetEntities(Memory& mem, uintptr_t localPawn) {
+    std::vector<Entity> list;
+    uintptr_t entityList = mem.Read<uintptr_t>(mem.clientBase + offsets::dwEntityList);
+    if (!entityList) return list;
+
+    for (int i = 1; i < 64; ++i) {
+        uintptr_t listEntry = mem.Read<uintptr_t>(entityList + (8 * (i & 0x7FFF) >> 9) + 16);
+        if (!listEntry) continue;
+
+        uintptr_t controller = mem.Read<uintptr_t>(listEntry + 120 * (i & 0x1FF));
+        if (!controller) continue;
+
+        uint32_t pawnHandle = mem.Read<uint32_t>(controller + offsets::m_hPlayerPawn);
+        if (!pawnHandle) continue;
+
+        uintptr_t listEntry2 = mem.Read<uintptr_t>(entityList + 0x8 * ((pawnHandle & 0x7FFF) >> 9) + 16);
+        if (!listEntry2) continue;
+
+        uintptr_t pawn = mem.Read<uintptr_t>(listEntry2 + 120 * (pawnHandle & 0x1FF));
+        if (!pawn || pawn == localPawn) continue;
+
+        int health = mem.Read<int>(pawn + offsets::m_iHealth);
+        int lifeState = mem.Read<uint8_t>(pawn + offsets::m_lifeState);
+        if (health <= 0 || lifeState != 0) continue;
+
+        Entity e;
+        e.controller = controller;
+        e.pawn = pawn;
+        e.health = health;
+        e.team = mem.Read<uint8_t>(pawn + offsets::m_iTeamNum);
+        e.armor = mem.Read<int>(pawn + offsets::m_ArmorValue);
+        e.alive = true;
+        e.scoped = mem.Read<bool>(pawn + offsets::m_bIsScoped);
+
+        uintptr_t sceneNode = mem.Read<uintptr_t>(pawn + offsets::m_pGameSceneNode);
+        if (sceneNode) {
+            e.origin = mem.Read<Vector3>(sceneNode + offsets::m_vecAbsOrigin);
+            // Head approx (bone 6 later)
+            e.head = { e.origin.x, e.origin.y, e.origin.z + 72.0f };
+        }
+
+        list.push_back(e);
+    }
+    return list;
+}
+
+// ======================== AIMBOT ========================
+void Aimbot(Memory& mem, const std::vector<Entity>& entities, uintptr_t localPawn, int localTeam, const ViewMatrix& vm, int width, int height) {
+    if (!Zeldox::aimbot_enabled || !(GetAsyncKeyState(Zeldox::aimbot_key) & 0x8000))
+        return;
+
+    Vector3 localOrigin = mem.Read<Vector3>(localPawn + offsets::m_vOldOrigin);
+    float bestFov = Zeldox::aimbot_fov;
+    Vector3 bestAngle{};
+    bool found = false;
+
+    for (const auto& e : entities) {
+        if (Zeldox::aimbot_team_check && e.team == localTeam) continue;
+
+        Vector2 screen;
+        if (!WorldToScreen(e.head, screen, vm, width, height)) continue;
+
+        float dx = screen.x - width / 2.0f;
+        float dy = screen.y - height / 2.0f;
+        float fov = sqrtf(dx * dx + dy * dy);
+
+        if (fov < bestFov) {
+            bestFov = fov;
+            // Calculate angle
+            Vector3 delta = e.head - localOrigin;
+            float hyp = delta.Length();
+            bestAngle.x = -asinf(delta.z / hyp) * (180.0f / 3.14159265f);
+            bestAngle.y = atan2f(delta.y, delta.x) * (180.0f / 3.14159265f);
+            found = true;
+        }
+    }
+
+    if (found) {
+        Vector3 current = mem.Read<Vector3>(mem.clientBase + offsets::dwViewAngles);
+        Vector3 delta = bestAngle - current;
+        // Normalize yaw
+        while (delta.y > 180) delta.y -= 360;
+        while (delta.y < -180) delta.y += 360;
+
+        Vector3 finalAng;
+        finalAng.x = current.x + delta.x / Zeldox::aimbot_smooth;
+        finalAng.y = current.y + delta.y / Zeldox::aimbot_smooth;
+        finalAng.z = 0;
+
+        mem.Write<Vector3>(mem.clientBase + offsets::dwViewAngles, finalAng);
+    }
+}
+
+// ======================== TRIGGERBOT ========================
+void Triggerbot(Memory& mem, uintptr_t localPawn) {
+    if (!Zeldox::triggerbot_enabled || !(GetAsyncKeyState(Zeldox::triggerbot_key) & 0x8000))
+        return;
+
+    int crosshairId = mem.Read<int>(localPawn + offsets::m_iIDEntIndex);
+    if (crosshairId > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(Zeldox::triggerbot_delay));
+        // Force attack (write to +attack button state or mouse event)
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+    }
+}
+
+// ======================== NO FLASH ========================
+void NoFlash(Memory& mem, uintptr_t localPawn) {
+    if (!Zeldox::no_flash) return;
+    float flash = mem.Read<float>(localPawn + offsets::m_flFlashDuration);
+    if (flash > 0.0f)
+        mem.Write<float>(localPawn + offsets::m_flFlashDuration, 0.0f);
+}
+
+// ======================== BUNNY HOP ========================
+void BunnyHop(Memory& mem, uintptr_t localPawn) {
+    if (!Zeldox::bhop) return;
+    if (!(GetAsyncKeyState(VK_SPACE) & 0x8000)) return;
+
+    int flags = mem.Read<int>(localPawn + offsets::m_fFlags);
+    if (flags & (1 << 0)) { // FL_ONGROUND
+        // Force jump via button or +jump
+        // Simple external: send space
+    }
+}
+
+// ======================== CONSOLE MENU ========================
+void DrawMenu() {
+    system("cls");
+    printf("================================================\n");
+    printf("           Z E L D O X  |  CS2 External\n");
+    printf("================================================\n");
+    printf(" [INSERT] Toggle Menu\n\n");
+
+    printf(" --- AIMBOT ---\n");
+    printf(" [%c] Enabled          (F1)\n", Zeldox::aimbot_enabled ? 'X' : ' ');
+    printf(" [%c] Team Check       (F2)\n", Zeldox::aimbot_team_check ? 'X' : ' ');
+    printf(" FOV: %.1f             (F3/F4)\n", Zeldox::aimbot_fov);
+    printf(" Smooth: %.1f          (F5/F6)\n", Zeldox::aimbot_smooth);
+
+    printf("\n --- TRIGGERBOT ---\n");
+    printf(" [%c] Enabled          (F7)\n", Zeldox::triggerbot_enabled ? 'X' : ' ');
+
+    printf("\n --- ESP ---\n");
+    printf(" [%c] Enabled          (F8)\n", Zeldox::esp_enabled ? 'X' : ' ');
+    printf(" [%c] Box              (F9)\n", Zeldox::esp_box ? 'X' : ' ');
+    printf(" [%c] Skeleton         (F10)\n", Zeldox::esp_skeleton ? 'X' : ' ');
+    printf(" [%c] Health Bar       (F11)\n", Zeldox::esp_health ? 'X' : ' ');
+    printf(" [%c] Name             (F12)\n", Zeldox::esp_name ? 'X' : ' ');
+
+    printf("\n --- MISC ---\n");
+    printf(" [%c] No Flash         (1)\n", Zeldox::no_flash ? 'X' : ' ');
+    printf(" [%c] Bunny Hop        (2)\n", Zeldox::bhop ? 'X' : ' ');
+    printf(" [%c] Radar Hack       (3)\n", Zeldox::radar_hack ? 'X' : ' ');
+
+    printf("\n================================================\n");
+    printf(" Offsets: 2026-09-25 | a2x/cs2-dumper\n");
+    printf("================================================\n");
+}
+
+void HandleInput() {
+    if (GetAsyncKeyState(VK_INSERT) & 1) Zeldox::menu_open = !Zeldox::menu_open;
+    if (GetAsyncKeyState(VK_F1) & 1) Zeldox::aimbot_enabled = !Zeldox::aimbot_enabled;
+    if (GetAsyncKeyState(VK_F2) & 1) Zeldox::aimbot_team_check = !Zeldox::aimbot_team_check;
+    if (GetAsyncKeyState(VK_F3) & 1) Zeldox::aimbot_fov = max(1.0f, Zeldox::aimbot_fov - 0.5f);
+    if (GetAsyncKeyState(VK_F4) & 1) Zeldox::aimbot_fov += 0.5f;
+    if (GetAsyncKeyState(VK_F5) & 1) Zeldox::aimbot_smooth = max(1.0f, Zeldox::aimbot_smooth - 0.5f);
+    if (GetAsyncKeyState(VK_F6) & 1) Zeldox::aimbot_smooth += 0.5f;
+    if (GetAsyncKeyState(VK_F7) & 1) Zeldox::triggerbot_enabled = !Zeldox::triggerbot_enabled;
+    if (GetAsyncKeyState(VK_F8) & 1) Zeldox::esp_enabled = !Zeldox::esp_enabled;
+    if (GetAsyncKeyState(VK_F9) & 1) Zeldox::esp_box = !Zeldox::esp_box;
+    if (GetAsyncKeyState(VK_F10) & 1) Zeldox::esp_skeleton = !Zeldox::esp_skeleton;
+    if (GetAsyncKeyState(VK_F11) & 1) Zeldox::esp_health = !Zeldox::esp_health;
+    if (GetAsyncKeyState(VK_F12) & 1) Zeldox::esp_name = !Zeldox::esp_name;
+    if (GetAsyncKeyState('1') & 1) Zeldox::no_flash = !Zeldox::no_flash;
+    if (GetAsyncKeyState('2') & 1) Zeldox::bhop = !Zeldox::bhop;
+    if (GetAsyncKeyState('3') & 1) Zeldox::radar_hack = !Zeldox::radar_hack;
+}
+
+// ======================== MAIN ========================
+int main() {
+    SetConsoleTitleA("Zeldox | CS2 External");
+    Memory mem;
+
+    printf("[Zeldox] Waiting for cs2.exe...\n");
+    while (!mem.Attach(L"cs2.exe")) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    printf("[Zeldox] Attached. PID: %lu\n", mem.pid);
+
+    mem.clientBase = mem.GetModuleBase(L"client.dll");
+    if (!mem.clientBase) {
+        printf("[Zeldox] client.dll not found.\n");
+        return 1;
+    }
+    printf("[Zeldox] client.dll @ 0x%llX\n", mem.clientBase);
+    printf("[Zeldox] Ready. INSERT = menu\n");
+
+    int width = GetSystemMetrics(SM_CXSCREEN);
+    int height = GetSystemMetrics(SM_CYSCREEN);
+
+    while (true) {
+        HandleInput();
+
+        if (Zeldox::menu_open)
+            DrawMenu();
+
+        uintptr_t localPawn = mem.Read<uintptr_t>(mem.clientBase + offsets::dwLocalPlayerPawn);
+        if (!localPawn) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
+
+        int localTeam = mem.Read<uint8_t>(localPawn + offsets::m_iTeamNum);
+        ViewMatrix vm = mem.Read<ViewMatrix>(mem.clientBase + offsets::dwViewMatrix);
+
+        auto entities = GetEntities(mem, localPawn);
+
+        Aimbot(mem, entities, localPawn, localTeam, vm, width, height);
+        Triggerbot(mem, localPawn);
+        NoFlash(mem, localPawn);
+        BunnyHop(mem, localPawn);
+
+        // ESP rendering would go here with overlay (GDI / ImGui / DirectX)
+        // For pure external console this is the logic core.
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    return 0;
+}
